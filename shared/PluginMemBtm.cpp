@@ -18,8 +18,20 @@ const char PluginMemBtm_kName[] = "plugin.memoryBitmap";
 
 struct MemBitmap
 {
-	int w,h;
+	int w,h;	
 	CoronaExternalBitmapFormat format;
+
+#ifdef _WIN32
+	CoronaExternalBitmapFormat rep_format;	// Representation format (workaround for issues with non-multiple-of-4 sizes)
+
+	CoronaExternalBitmapFormat GetRepFormat (void) const { return rep_format; }
+#else
+	CoronaExternalBitmapFormat GetRepFormat (void) const { return format; }
+#endif
+	int GetEffectiveBPP (void) const { return CoronaExternalFormatBPP(GetRepFormat()); }
+
+	void InitData (lua_State * L);
+
 	unsigned char*data;
 };
 
@@ -40,7 +52,7 @@ static const void* MemBitmap_GetData(void *context)
 
 static CoronaExternalBitmapFormat MemBitmap_Format(void *context)
 {
-	return ((MemBitmap*)context)->format;
+	return ((MemBitmap *)context)->GetRepFormat();
 }
 
 static void MemBitmap_Dispose(void *context)
@@ -91,11 +103,11 @@ static int MemBitmap_GetPixel( lua_State *L )
 		if ( x>=0 && y>=0 )
 		{
 			const int bpp = CoronaExternalFormatBPP(btm->format);
-			const int stride = btm->w * bpp;
+			const int true_bpp = btm->GetEffectiveBPP(), stride = btm->w * true_bpp;
 			const double m = 1/255.0;
 			for (int c = 0; c<bpp; c++)
 			{
-				lua_pushnumber( L, m * btm->data[ stride*y + x*bpp + c ]);
+				lua_pushnumber( L, m * btm->data[ stride*y + x*true_bpp + c ]);
 				res ++;
 			}
 		}
@@ -137,7 +149,7 @@ static int MemBitmap_SetPixel( lua_State *L )
 		if ( x>=0 && y>=0 )
 		{
 			const int bpp = CoronaExternalFormatBPP(btm->format);
-			const int stride = btm->w * bpp;
+			const int true_bpp = btm->GetEffectiveBPP(), stride = btm->w * true_bpp;
 			const double m = 255.0;
 			if (lua_type(L, index) == LUA_TNUMBER)
 			{
@@ -146,7 +158,7 @@ static int MemBitmap_SetPixel( lua_State *L )
 					if ( lua_type(L, index) == LUA_TNUMBER )
 					{
 						double color = lua_tonumber(L, index);
-						btm->data[ stride*y + x*bpp + c ] = clampColor(color*m);
+						btm->data[ stride*y + x*true_bpp + c ] = clampColor(color*m);
 					}
 					index++;
 				}
@@ -164,7 +176,7 @@ static int MemBitmap_SetPixel( lua_State *L )
 					if ( lua_type(L, -1) == LUA_TNUMBER )
 					{
 						double color = lua_tonumber(L, -1);
-						btm->data[ stride*y + x*bpp + c ] = clampColor(color*m);
+						btm->data[ stride*y + x*true_bpp + c ] = clampColor(color*m);
 					}
 					lua_pop(L, 1);
 				}
@@ -175,6 +187,46 @@ static int MemBitmap_SetPixel( lua_State *L )
 	return 0;
 }
 
+void MemBitmap::InitData (lua_State * L)
+{
+	size_t sz = w * h * CoronaExternalFormatBPP(format);
+
+#ifdef _WIN32
+	rep_format = format;
+
+	if (w % 4 != 0)
+	{
+		switch (CoronaExternalFormatBPP(format))
+		{
+		case 1:
+			luaL_error(L, "Unable to reliably create mask with non-multiple-of-4 width");
+			break;
+		case 3:
+			rep_format = kExternalBitmapFormat_RGBA;
+			sz += w * h;
+			break;
+		}
+	}
+#endif
+
+	data = new unsigned char[sz];
+
+	memset( data, 0, sz );
+
+#ifdef _WIN32
+	int bpp = CoronaExternalFormatBPP(format), true_bpp = GetEffectiveBPP();
+
+	if (bpp != true_bpp)
+	{
+		unsigned char fixup[4] = { 0, 0, 0, 255 };
+
+		for (size_t offset = bpp; offset < sz; offset += true_bpp)
+		{
+			for (int i = 0; i < true_bpp - bpp; ++i) data[offset + i] = fixup[3 - i];
+		}
+	}
+#endif
+}
 
 static int MemBitmap_Resize( lua_State *L )
 {
@@ -211,10 +263,10 @@ static int MemBitmap_Resize( lua_State *L )
 			
 			bitmap->w = w;
 			bitmap->h = h;
-			size_t sz = w*h*CoronaExternalFormatBPP(bitmap->format);
+
 			delete [] bitmap->data;
-			bitmap->data = new unsigned char[sz];
-			memset( bitmap->data, 0, sz );
+
+			bitmap->InitData(L);
 		}
 		
 	}
@@ -330,9 +382,8 @@ static int PluginMemBtm_New(lua_State *L )
 			bitmap->w = w;
 			bitmap->h = h;
 			bitmap->format = format;
-			size_t sz = w*h*CoronaExternalFormatBPP(format);
-			bitmap->data = new unsigned char[sz];
-			memset( bitmap->data, 0, sz );
+
+			bitmap->InitData(L);
 			
 			// set up callbacks
 			CoronaExternalTextureCallbacks callbacks = {};
